@@ -7,6 +7,7 @@ SSL_CTX  *g_client_ctx = NULL;
 SSL_CTX  *g_server_ctx = NULL;
 const char *g_logdir = ".";
 int g_insecure = 0;
+int g_transparent = 0;
 
 static void die(const char *msg)
 {

@@ -30,6 +30,7 @@ extern SSL_CTX   *g_client_ctx;
 extern SSL_CTX   *g_server_ctx;
 extern const char *g_logdir;
 extern int g_insecure;
+extern int g_transparent;
 
 int  ca_load(const char *keypath, const char *certpath);
 int  ca_generate(const char *keypath, const char *certpath);

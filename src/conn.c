@@ -5,6 +5,9 @@
 #include <arpa/inet.h>
 #include <signal.h>
 #include <time.h>
+#ifdef __linux__
+#include <linux/netfilter_ipv4.h>
+#endif
 
 #define BUF_SIZE 16384
 
@@ -169,6 +172,30 @@ static int do_direct_tls(struct thread_arg *ta, char *host, uint16_t port)
     return 0;
 }
 
+static int get_original_dst(int fd, char *host, size_t hostcap, uint16_t *port)
+{
+    struct sockaddr_in sa;
+    socklen_t len = sizeof(sa);
+    if (getsockopt(fd, SOL_IP, SO_ORIGINAL_DST, &sa, &len) != 0)
+        return -1;
+    if (!inet_ntop(AF_INET, &sa.sin_addr, host, (socklen_t)hostcap))
+        return -1;
+    *port = ntohs(sa.sin_port);
+    return 0;
+}
+
+static int do_transparent(struct thread_arg *ta)
+{
+    char host[INET_ADDRSTRLEN];
+    uint16_t port;
+    if (get_original_dst(ta->fd, host, sizeof(host), &port) != 0) {
+        close(ta->fd);
+        free(ta);
+        return -1;
+    }
+    return do_direct_tls(ta, host, port);
+}
+
 static int do_connect_proxy(struct thread_arg *ta)
 {
     char line[1024];
@@ -208,6 +235,11 @@ static int do_connect_proxy(struct thread_arg *ta)
 void *conn_thread(void *arg)
 {
     struct thread_arg *ta = arg;
+
+    if (g_transparent) {
+        do_transparent(ta);
+        return NULL;
+    }
 
     char first[8];
     ssize_t r = recv(ta->fd, first, 1, MSG_PEEK);

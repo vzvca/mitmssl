@@ -14,6 +14,7 @@ static void usage(const char *prog)
         "  -l PORT     listen port (default 8080)\n"
         "  -c DIR      log directory (default ./logs)\n"
         "  -k          do not verify upstream server certificates\n"
+        "  -t          transparent mode (SO_ORIGINAL_DST, no CONNECT)\n"
         "  -C KEY,CERT  CA key and cert paths; generated if absent\n"
         "  -h          help\n",
         prog);
@@ -28,11 +29,12 @@ int main(int argc, char **argv)
     const char *ca_cert = "ca.crt";
 
     int opt;
-    while ((opt = getopt(argc, argv, "l:c:kC:h")) != -1) {
+    while ((opt = getopt(argc, argv, "l:c:ktC:h")) != -1) {
         switch (opt) {
         case 'l': port = atoi(optarg); break;
         case 'c': g_logdir = optarg; break;
         case 'k': g_insecure = 1; break;
+        case 't': g_transparent = 1; break;
         case 'C': {
             char *comma = strchr(optarg, ',');
             if (!comma) usage(argv[0]);
