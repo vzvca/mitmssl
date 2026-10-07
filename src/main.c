@@ -15,6 +15,10 @@ static void usage(const char *prog)
         "  -c DIR      log directory (default ./logs)\n"
         "  -k          do not verify upstream server certificates\n"
         "  -t          transparent mode (SO_ORIGINAL_DST, no CONNECT)\n"
+        "  -m          MIME-aware logging: hexdump binary HTTP bodies\n"
+        "  -e CMD      pipe decoded traffic to a helper program (per flow);\n"
+        "              %%h = host, %%p = port; framing on stdin: '>> n' / '<< n'\n"
+        "              followed by n bytes; '## EOF' at flow end\n"
         "  -C KEY,CERT  CA key and cert paths; generated if absent\n"
         "  -h          help\n",
         prog);
@@ -29,12 +33,14 @@ int main(int argc, char **argv)
     const char *ca_cert = "ca.crt";
 
     int opt;
-    while ((opt = getopt(argc, argv, "l:c:ktC:h")) != -1) {
+    while ((opt = getopt(argc, argv, "l:c:ktme:C:h")) != -1) {
         switch (opt) {
         case 'l': port = atoi(optarg); break;
         case 'c': g_logdir = optarg; break;
         case 'k': g_insecure = 1; break;
         case 't': g_transparent = 1; break;
+        case 'm': g_mime = 1; break;
+        case 'e': g_exec_cmd = optarg; break;
         case 'C': {
             char *comma = strchr(optarg, ',');
             if (!comma) usage(argv[0]);

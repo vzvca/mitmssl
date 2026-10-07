@@ -36,6 +36,13 @@ Requires OpenSSL development headers and lib (1.1.1 or 3.x):
 - `-l PORT` listen port (default 8080)
 - `-c DIR`  log directory (default `logs`)
 - `-k`       skip upstream certificate verification (debug only)
+- `-m`       MIME-aware logging: decode HTTP framing; dump text bodies as-is,
+  hexdump binary bodies (`image/*`, `audio/*`, `video/*`, `application/...`);
+  non-HTTP flows fall back to a printable-ratio heuristic
+- `-e CMD`   pipe decoded traffic to a helper program, one process per flow.
+  `%h`/`%p` in CMD expand to host/port; stdin receives a simple framing:
+  `>> <n>\n` + n bytes (client to server), `<< <n>\n` + n bytes
+  (server to client), `## EOF\n` at flow end. Example: `-e cat` to print.
 - `-t`       transparent mode: recover the destination with
   `SO_ORIGINAL_DST` (Linux Netfilter NAT) instead of parsing a `CONNECT`
   request; pairs with an iptables/nftables redirect rule
@@ -57,6 +64,13 @@ Example (transparent mode, on the NAT gateway):
 
 Install `ca.crt` in the client trust store so forged certificates are
 accepted. Do not disable certificate verification on the client instead.
+
+## Protocol-agnostic inspection
+
+The proxy only terminates TLS and relays bytes; it does not assume HTTP.
+Any protocol over TLS/SSL is intercepted and logged. With `-m`, HTTP
+framing (Content-Length, chunked) is additionally understood to hexdump
+binary bodies; other protocols are heuristically dumped.
 
 ## Limitations
 

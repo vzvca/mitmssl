@@ -8,6 +8,8 @@ SSL_CTX  *g_server_ctx = NULL;
 const char *g_logdir = ".";
 int g_insecure = 0;
 int g_transparent = 0;
+int g_mime = 0;
+const char *g_exec_cmd = NULL;
 
 static void die(const char *msg)
 {
