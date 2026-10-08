@@ -83,8 +83,28 @@ Notes:
 - On a gateway, both rules are needed: `PREROUTING` for forwarded
   client traffic, `OUTPUT` (with the uid exclusion) for the proxy's own
   upstream connections.
-- If the proxy must run as root, exclude its traffic by cgroup mark
-  (`net_cls` + `--mark`) instead of uid.
+- If the proxy must run as root, exclude its traffic by cgroup instead of
+  uid. Two options:
+
+  cgroup v1 (`net_cls`):
+
+      mkdir /sys/fs/cgroup/net_cls/mitmssl
+      echo 0x0001 > /sys/fs/cgroup/net_cls/mitmssl/net_cls.classid
+      echo $$ > /sys/fs/cgroup/net_cls/mitmssl/tasks
+      ./mitmssl -t -l 8443 -c logs
+      iptables -t nat -A OUTPUT -p tcp --dport 443 -m mark ! --mark 1 \
+          -j REDIRECT --to-port 8443
+
+  cgroup v2 (match by path, e.g. under systemd):
+
+      systemd-run --unit=mitmssl --slice=mitmssl.slice \
+          ./mitmssl -t -l 8443 -c logs
+      iptables -t nat -A OUTPUT -p tcp --dport 443 \
+          -m cgroup ! --path mitmssl.slice \
+          -j REDIRECT --to-port 8443
+
+  With `-m mark ! --mark 1`, packets carrying no mark also match the
+  negation, so make sure nothing else uses class 1.
 
 Install `ca.crt` in the client trust store so forged certificates are
 accepted. Do not disable certificate verification on the client instead.
