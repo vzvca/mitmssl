@@ -24,6 +24,14 @@ int is_stopping(void)
     return g_stop;
 }
 
+void log_free(struct conn_log *lg)
+{
+    if (!lg) return;
+    if (lg->insp_c2s) inspect_free(lg->insp_c2s);
+    if (lg->insp_s2c) inspect_free(lg->insp_s2c);
+    free(lg);
+}
+
 static int connect_remote(const char *host, uint16_t port)
 {
     struct sockaddr_in sa;
@@ -111,9 +119,6 @@ static int do_direct_tls(struct thread_arg *ta, char *host, uint16_t port)
     const char *sni = SSL_get_servername(cli, TLSEXT_NAMETYPE_host_name);
     if (!sni) sni = host;
 
-    char peer[256];
-    snprintf(peer, sizeof(peer), "%s:%u", sni, port);
-
     int rfd = connect_remote(host, port);
     if (rfd < 0) {
         SSL_free(cli);
@@ -132,7 +137,17 @@ static int do_direct_tls(struct thread_arg *ta, char *host, uint16_t port)
         return -1;
     }
 
-    struct conn_log *lg = log_open(sni, peer);
+    struct conn_log *lg = calloc(1, sizeof(*lg));
+    if (!lg) return -1;
+    lg->id = output_open_flow(sni, port);
+    if (g_mime) {
+        lg->insp_c2s = inspect_new();
+        lg->insp_s2c = inspect_new();
+        if (!lg->insp_c2s || !lg->insp_s2c) {
+            log_free(lg);
+            return -1;
+        }
+    }
 
     fd_set rfds;
     char buf[BUF_SIZE];
@@ -150,18 +165,19 @@ static int do_direct_tls(struct thread_arg *ta, char *host, uint16_t port)
         if (FD_ISSET(cfd, &rfds)) {
             int n = SSL_read(cli, buf, sizeof(buf));
             if (n <= 0) break;
-            log_write(lg, 1, buf, (size_t)n);
+            output_data(lg->id, 1, buf, (size_t)n, lg->insp_c2s);
             if (SSL_write(srv, buf, (size_t)n) <= 0) break;
         }
         if (FD_ISSET(rfd, &rfds)) {
             int n = SSL_read(srv, buf, sizeof(buf));
             if (n <= 0) break;
-            log_write(lg, 0, buf, (size_t)n);
+            output_data(lg->id, 0, buf, (size_t)n, lg->insp_s2c);
             if (SSL_write(cli, buf, (size_t)n) <= 0) break;
         }
     }
 
-    log_close(lg);
+    output_eof(lg->id);
+    log_free(lg);
     SSL_shutdown(srv);
     SSL_shutdown(cli);
     SSL_free(srv);

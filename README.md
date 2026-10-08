@@ -19,9 +19,7 @@ client --TLS--> mitmssl --TLS--> real server
 - For each tunnel, reads the SNI (or the CONNECT host), forges a leaf
   certificate signed by the CA, completes the handshake with the client, then
   connects to the upstream server over TLS.
-- Relays and logs the decoded traffic in clear text:
-  - `<logdir>/<host>:<port>.c2s` - client to server
-  - `<logdir>/<host>:<port>.s2c` - server to client
+- Relays the decoded traffic to stdout with per-flow framing (see below).
 
 ## Build
 
@@ -31,18 +29,17 @@ Requires OpenSSL development headers and lib (1.1.1 or 3.x):
 
 ## Usage
 
-    ./mitmssl [-l PORT] [-c LOGDIR] [-k] [-C KEY,CERT]
+    ./mitmssl [-l PORT] [-k] [-m] [-b] [-t] [-C KEY,CERT]
 
 - `-l PORT` listen port (default 8080)
-- `-c DIR`  log directory (default `logs`)
 - `-k`       skip upstream certificate verification (debug only)
-- `-m`       MIME-aware logging: decode HTTP framing; dump text bodies as-is,
+- `-m`       MIME-aware rendering: decode HTTP framing; dump text bodies as-is,
   hexdump binary bodies (`image/*`, `audio/*`, `video/*`, `application/...`);
   non-HTTP flows fall back to a printable-ratio heuristic
-- `-e CMD`   pipe decoded traffic to a helper program, one process per flow.
-  `%h`/`%p` in CMD expand to host/port; stdin receives a simple framing:
-  `>> <n>\n` + n bytes (client to server), `<< <n>\n` + n bytes
-  (server to client), `## EOF\n` at flow end. Example: `-e cat` to print.
+- `-b`       binary framing (see below) instead of text framing
+- `-t`       transparent mode: recover the destination with
+  `SO_ORIGINAL_DST` (Linux Netfilter NAT) instead of parsing a `CONNECT`
+  request; pairs with an iptables/nftables redirect rule
 - `-t`       transparent mode: recover the destination with
   `SO_ORIGINAL_DST` (Linux Netfilter NAT) instead of parsing a `CONNECT`
   request; pairs with an iptables/nftables redirect rule
@@ -51,12 +48,44 @@ Requires OpenSSL development headers and lib (1.1.1 or 3.x):
 
 Example (explicit proxy mode):
 
-    ./mitmssl -l 8080 -c logs
+    ./mitmssl -l 8080 | tee capture.txt
     curl -x http://127.0.0.1:8080 --cacert ca.crt https://example.com/
+
+## Output framing
+
+All decoded traffic is written to stdout, interleaved across concurrent
+flows; each frame carries the id of its flow (a monotonic counter, never
+reused). Use shell pipes to process the stream (`tee`, `grep`, your own
+tool, ...).
+
+Text framing (default):
+
+    # 7 OPEN example.com:443
+    7 >> 122
+    <122 raw bytes, client to server>
+    7 << 139
+    <139 raw bytes, server to client>
+    7 ## EOF
+
+With `-m`, the payload of `>>`/`<<` frames is rendered (HTTP headers kept,
+text bodies as-is, binary bodies hexdumped) instead of raw bytes.
+
+Binary framing (`-b`), for machine consumers: each frame is a 12-byte
+header followed by `sz` payload bytes:
+
+    struct frame {
+        int32_t op;   /* 1=OPEN, 2=IN (c2s), 3=OUT (s2c), 4=EOF */
+        int32_t sz;   /* payload size, may be 0 */
+        int32_t id;   /* flow id, monotonic, never reused */
+        /* uint8_t data[sz]; */
+    };
+
+The OPEN payload is the destination `host:port` string. IN/OUT payloads are
+raw decoded bytes. EOF has sz=0. Fields are native-endian int32.
 
 Example (transparent mode, on the NAT gateway):
 
-    ./mitmssl -t -l 8443 -c logs
+    ./mitmssl -t -l 8443
     iptables -t nat -A PREROUTING -i eth0 -p tcp --dport 443 \
         -j REDIRECT --to-port 8443
     iptables -t nat -A OUTPUT -p tcp --dport 443 -m owner ! --uid-owner mitmssl \
@@ -73,7 +102,7 @@ socket, so the proxy's own traffic is exempted.
 This requires a dedicated user and running the proxy under it:
 
     useradd -r -s /usr/sbin/nologin mitmssl
-    sudo -u mitmssl ./mitmssl -t -l 8443 -c logs
+    sudo -u mitmssl ./mitmssl -t -l 8443
 
 Notes:
 
@@ -91,14 +120,14 @@ Notes:
       mkdir /sys/fs/cgroup/net_cls/mitmssl
       echo 0x0001 > /sys/fs/cgroup/net_cls/mitmssl/net_cls.classid
       echo $$ > /sys/fs/cgroup/net_cls/mitmssl/tasks
-      ./mitmssl -t -l 8443 -c logs
+      ./mitmssl -t -l 8443
       iptables -t nat -A OUTPUT -p tcp --dport 443 -m mark ! --mark 1 \
           -j REDIRECT --to-port 8443
 
   cgroup v2 (match by path, e.g. under systemd):
 
       systemd-run --unit=mitmssl --slice=mitmssl.slice \
-          ./mitmssl -t -l 8443 -c logs
+          ./mitmssl -t -l 8443
       iptables -t nat -A OUTPUT -p tcp --dport 443 \
           -m cgroup ! --path mitmssl.slice \
           -j REDIRECT --to-port 8443

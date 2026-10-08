@@ -12,15 +12,24 @@ static void usage(const char *prog)
     fprintf(stderr,
         "Usage: %s [options]\n"
         "  -l PORT     listen port (default 8080)\n"
-        "  -c DIR      log directory (default ./logs)\n"
         "  -k          do not verify upstream server certificates\n"
         "  -t          transparent mode (SO_ORIGINAL_DST, no CONNECT)\n"
-        "  -m          MIME-aware logging: hexdump binary HTTP bodies\n"
-        "  -e CMD      pipe decoded traffic to a helper program (per flow);\n"
-        "              %%h = host, %%p = port; framing on stdin: '>> n' / '<< n'\n"
-        "              followed by n bytes; '## EOF' at flow end\n"
+        "  -m          MIME-aware rendering: hexdump binary HTTP bodies\n"
+        "  -b          binary output framing on stdout: 12-byte header\n"
+        "              {int32 op; int32 sz; int32 id;} + sz bytes;\n"
+        "              op: 1=OPEN, 2=IN(c2s), 3=OUT(s2c), 4=EOF\n"
         "  -C KEY,CERT  CA key and cert paths; generated if absent\n"
-        "  -h          help\n",
+        "  -h          help\n"
+        "\n"
+        "  Decoded traffic goes to stdout. Text framing (default):\n"
+        "    # <id> OPEN <host>:<port>\n"
+        "    <id> >> <n>  followed by n raw bytes (client to server)\n"
+        "    <id> << <n>  followed by n raw bytes (server to client)\n"
+        "    <id> ## EOF\n"
+        "  Use shell pipes to process the stream, e.g.:\n"
+        "    ./mitmssl | tee capture.txt\n"
+        "  With -m, IN/OUT frames are rendered (text kept, binary\n"
+        "  hexdumped) instead of raw bytes.\n",
         prog);
     exit(1);
 }
@@ -28,19 +37,17 @@ static void usage(const char *prog)
 int main(int argc, char **argv)
 {
     int port = DEFAULT_PORT;
-    g_logdir = "logs";
     const char *ca_key = "ca.key";
     const char *ca_cert = "ca.crt";
 
     int opt;
-    while ((opt = getopt(argc, argv, "l:c:ktme:C:h")) != -1) {
+    while ((opt = getopt(argc, argv, "l:ktmbC:h")) != -1) {
         switch (opt) {
         case 'l': port = atoi(optarg); break;
-        case 'c': g_logdir = optarg; break;
         case 'k': g_insecure = 1; break;
         case 't': g_transparent = 1; break;
         case 'm': g_mime = 1; break;
-        case 'e': g_exec_cmd = optarg; break;
+        case 'b': g_binary = 1; break;
         case 'C': {
             char *comma = strchr(optarg, ',');
             if (!comma) usage(argv[0]);
@@ -115,8 +122,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    fprintf(stderr, APP_NAME ": listening on 127.0.0.1:%d, logs in %s\n",
-            port, g_logdir);
+    fprintf(stderr, APP_NAME ": listening on 127.0.0.1:%d\n", port);
 
     while (!is_stopping()) {
         int cfd = accept(lfd, NULL, NULL);

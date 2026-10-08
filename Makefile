@@ -6,8 +6,8 @@ LDLIBS   = -L$(OPENSSL_LIB) -lssl -lcrypto -lpthread
 OPENSSL_INC ?= /tmp/openssl-3.5.7/include
 OPENSSL_LIB ?= /tmp/openssl-lib
 
-OBJS = src/main.o src/ca.o src/forge.o src/log.o src/conn.o \
-       src/inspect.o src/exec.o
+OBJS = src/main.o src/ca.o src/forge.o src/conn.o \
+       src/inspect.o src/output.o
 BIN  = mitmssl
 
 all: $(BIN)
