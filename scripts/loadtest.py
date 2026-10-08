@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""Load test for mitmssl: many simultaneous CONNECT tunnels through the proxy.
+"""Load test for mitmssl: many simultaneous tunnels through the proxy.
 
-Each simulated client opens a CONNECT tunnel, performs a TLS handshake
-(validating the forged certificate against the mitmssl CA), sends one small
-HTTP request, and closes. Traffic per client is a few hundred bytes.
+In proxy mode (default), each simulated client opens a CONNECT tunnel.
+In transparent mode (--transparent), each client opens a raw TLS
+connection straight to the proxy listening port, as an iptables
+REDIRECT would deliver it; the proxy must recover the destination via
+SO_ORIGINAL_DST, so this mode requires the NAT rule to be in place.
+
+Each client performs a TLS handshake (validating the forged certificate
+against the mitmssl CA), sends one small HTTP request, and closes.
+Traffic per client is a few hundred bytes.
 
 Usage:
     ./loadtest.py -p 3333 -c 50 [-n 200] [--hosts github.com,google.com]
-                  [--ca ca.crt] [--timeout 10]
+                  [--ca ca.crt] [--timeout 10] [--transparent]
 
 Reports success rate, latency percentiles, and errors by category.
 """
@@ -23,21 +29,23 @@ from collections import Counter
 DEFAULT_HOSTS = ["github.com", "www.google.com", "example.com"]
 
 
-def one_request(proxy_host, proxy_port, host, cafile, timeout):
+def one_request(proxy_host, proxy_port, host, cafile, timeout,
+                transparent=False):
     t0 = time.monotonic()
     try:
         s = socket.create_connection((proxy_host, proxy_port), timeout=timeout)
         s.settimeout(timeout)
-        s.sendall(f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n"
-                  .encode())
-        resp = b""
-        while b"\r\n\r\n" not in resp:
-            chunk = s.recv(4096)
-            if not chunk:
-                return ("connect-closed", time.monotonic() - t0)
-            resp += chunk
-        if b" 200 " not in resp.split(b"\r\n")[0]:
-            return ("connect-rejected", time.monotonic() - t0)
+        if not transparent:
+            s.sendall(f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n"
+                      .encode())
+            resp = b""
+            while b"\r\n\r\n" not in resp:
+                chunk = s.recv(4096)
+                if not chunk:
+                    return ("connect-closed", time.monotonic() - t0)
+                resp += chunk
+            if b" 200 " not in resp.split(b"\r\n")[0]:
+                return ("connect-rejected", time.monotonic() - t0)
 
         ctx = ssl.create_default_context(cafile=cafile)
         w = ctx.wrap_socket(s, server_hostname=host)
@@ -85,6 +93,10 @@ def main():
     ap.add_argument("--hosts", default=",".join(DEFAULT_HOSTS))
     ap.add_argument("--ca", default="ca.crt")
     ap.add_argument("--timeout", type=float, default=10.0)
+    ap.add_argument("--transparent", action="store_true",
+                     help="raw TLS to the proxy (iptables REDIRECT must be "
+                          "in place, destination recovered via "
+                          "SO_ORIGINAL_DST)")
     args = ap.parse_args()
 
     hosts = [h.strip() for h in args.hosts.split(",") if h.strip()]
@@ -102,7 +114,7 @@ def main():
                 counter["done"] = i + 1
             host = hosts[i % len(hosts)]
             r = one_request(args.proxy_host, args.port, host,
-                            args.ca, args.timeout)
+                            args.ca, args.timeout, args.transparent)
             with lock:
                 results.append(r)
 

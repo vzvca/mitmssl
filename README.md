@@ -167,6 +167,12 @@ traffic):
     python3 scripts/loadtest.py -p 3333 -c 50 -n 200 --ca ca.crt \
         --hosts github.com,www.google.com
 
+For transparent mode, run the proxy with `-t` behind the iptables
+REDIRECT rule (see above), then add `--transparent` to the script:
+clients then send raw TLS straight to the proxy port, as the NAT would
+deliver it. Without the NAT rule in place the proxy cannot recover the
+destination and closes the connections immediately.
+
 `-c` is the number of concurrent clients, `-n` the total number of
 tunnels. The script validates the forged certificates, sends one HTTP
 request per tunnel, and reports success rate, latency percentiles and
