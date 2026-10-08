@@ -25,7 +25,7 @@ $(OPENSSL_DIR)/libcrypto.a: $(OPENSSL_DIR)/Configure
 
 $(BIN): $(OBJS) $(OPENSSL_DIR)/libcrypto.a
 	$(CC) $(CFLAGS) -I$(OPENSSL_INC) -o $@ $(OBJS) \
-	    -L$(OPENSSL_LIB) -lssl -lcrypto -lpthread
+	    -L$(OPENSSL_LIB) -lssl -lcrypto -lpthread -ldl
 
 src/%.o: src/%.c src/mitmssl.h
 	$(CC) $(CFLAGS) -I$(OPENSSL_INC) -c -o $@ $<
