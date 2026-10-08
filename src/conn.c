@@ -3,6 +3,7 @@
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <signal.h>
 #include <time.h>
 #ifdef __linux__
@@ -34,17 +35,28 @@ void log_free(struct conn_log *lg)
 
 static int connect_remote(const char *host, uint16_t port)
 {
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons(port);
-    if (inet_pton(AF_INET, host, &sa.sin_addr) != 1) return -1;
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-    if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
-        close(fd);
+    struct addrinfo hints, *res = NULL, *ai;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    char portstr[8];
+    snprintf(portstr, sizeof(portstr), "%u", port);
+
+    if (getaddrinfo(host, portstr, &hints, &res) != 0)
         return -1;
+
+    int fd = -1;
+    for (ai = res; ai; ai = ai->ai_next) {
+        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) continue;
+        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0)
+            break;
+        close(fd);
+        fd = -1;
     }
+    freeaddrinfo(res);
     return fd;
 }
 
@@ -135,7 +147,12 @@ static int do_direct_tls(struct thread_arg *ta, char *host, uint16_t port)
 
     int rfd = connect_remote(host, port);
     if (rfd < 0) {
+        fprintf(stderr, APP_NAME ": cannot connect to upstream %s:%u\n",
+                host, port);
+        SSL_shutdown(cli);
         SSL_free(cli);
+        close(ta->fd);
+        free(ta);
         return -1;
     }
 

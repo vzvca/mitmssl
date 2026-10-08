@@ -62,9 +62,15 @@ int main(int argc, char **argv)
         }
     }
 
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = stop_all;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;                 /* no SA_RESTART: accept() must fail
+                                        with EINTR so the loop can exit */
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
-    signal(SIGINT,  stop_all);
-    signal(SIGTERM, stop_all);
 
     if (ca_load(ca_key, ca_cert) != 0) {
         fprintf(stderr, APP_NAME ": generating new CA (%s, %s)\n",
