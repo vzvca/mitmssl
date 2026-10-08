@@ -9,6 +9,7 @@ int g_insecure = 0;
 int g_transparent = 0;
 int g_mime = 0;
 int g_binary = 0;
+const char *g_ca_path = NULL;
 
 static void die(const char *msg)
 {

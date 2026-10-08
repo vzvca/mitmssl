@@ -162,10 +162,15 @@ static int do_direct_tls(struct thread_arg *ta, char *host, uint16_t port)
     SSL_set_tlsext_host_name(srv, sni);
     SSL_set_alpn_protos(srv, ALPN_HTTP11, sizeof(ALPN_HTTP11) - 1);
     if (SSL_connect(srv) <= 0) {
+        fprintf(stderr, APP_NAME ": upstream TLS handshake failed for %s:%u\n",
+                sni, port);
         ERR_print_errors_fp(stderr);
         SSL_free(srv);
+        SSL_shutdown(cli);
         SSL_free(cli);
         close(rfd);
+        close(ta->fd);
+        free(ta);
         return -1;
     }
 

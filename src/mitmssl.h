@@ -37,6 +37,7 @@ extern int g_insecure;
 extern int g_transparent;
 extern int g_mime;
 extern int g_binary;
+extern const char *g_ca_path;
 
 int  ca_load(const char *keypath, const char *certpath);
 int  ca_generate(const char *keypath, const char *certpath);

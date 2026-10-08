@@ -18,6 +18,10 @@ static void usage(const char *prog)
         "  -b          binary output framing on stdout: 12-byte header\n"
         "              {int32 op; int32 sz; int32 id;} + sz bytes;\n"
         "              op: 1=OPEN, 2=IN(c2s), 3=OUT(s2c), 4=EOF\n"
+        "  -A PATH     trust store for upstream verification: a bundle file\n"
+        "              (e.g. /etc/ssl/certs/ca-certificates.crt) or a hashed\n"
+        "              directory (e.g. /etc/ssl/certs); by default the system\n"
+        "              locations are probed\n"
         "  -C KEY,CERT  CA key and cert paths; generated if absent\n"
         "  -h          help\n"
         "\n"
@@ -41,13 +45,14 @@ int main(int argc, char **argv)
     const char *ca_cert = "ca.crt";
 
     int opt;
-    while ((opt = getopt(argc, argv, "l:ktmbC:h")) != -1) {
+    while ((opt = getopt(argc, argv, "l:ktmbA:C:h")) != -1) {
         switch (opt) {
         case 'l': port = atoi(optarg); break;
         case 'k': g_insecure = 1; break;
         case 't': g_transparent = 1; break;
         case 'm': g_mime = 1; break;
         case 'b': g_binary = 1; break;
+        case 'A': g_ca_path = optarg; break;
         case 'C': {
             char *comma = strchr(optarg, ',');
             if (!comma) usage(argv[0]);
@@ -105,7 +110,38 @@ int main(int argc, char **argv)
     }
     SSL_CTX_set_min_proto_version(g_server_ctx, TLS1_2_VERSION);
     if (!g_insecure) {
-        SSL_CTX_set_default_verify_paths(g_server_ctx);
+        int ok = 0;
+        if (g_ca_path) {
+            ok = SSL_CTX_load_verify_locations(g_server_ctx, g_ca_path, NULL);
+            if (!ok && strchr(g_ca_path, '/') == NULL)
+                ok = SSL_CTX_load_verify_locations(g_server_ctx, NULL, g_ca_path);
+        } else {
+            const char *locations[][2] = {
+                { "/etc/ssl/certs/ca-certificates.crt", NULL },
+                { "/etc/pki/tls/certs/ca-bundle.crt",     NULL },
+                { "/etc/ssl/ca-bundle.pem",                NULL },
+                { "/etc/pki/tls/cacert.pem",               NULL },
+                { "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", NULL },
+                { NULL, "/etc/ssl/certs" },
+                { NULL, "/etc/pki/tls/certs" },
+                { NULL, "/system/etc/security/cacerts" },
+            };
+            for (size_t i = 0; !ok &&
+                    i < sizeof(locations)/sizeof(locations[0]); i++) {
+                if (locations[i][0])
+                    ok = SSL_CTX_load_verify_locations(g_server_ctx,
+                                                        locations[i][0], NULL);
+                else
+                    ok = SSL_CTX_load_verify_locations(g_server_ctx, NULL,
+                                                        locations[i][1]);
+            }
+            if (!ok)
+                ok = SSL_CTX_set_default_verify_paths(g_server_ctx);
+        }
+        if (!ok) {
+            fprintf(stderr, APP_NAME ": warning: no system trust store "
+                    "found; use -A PATH or -k\n");
+        }
         SSL_CTX_set_verify(g_server_ctx, SSL_VERIFY_PEER, NULL);
     }
 

@@ -63,13 +63,20 @@ void output_data(int64_t id, int to_server,
             fclose(mf);
             printf("%lld %s %zu\n", (long long)id,
                    to_server ? ">>" : "<<", rl);
-            if (rl > 0) fwrite(rp, 1, rl, stdout);
+            if (rl > 0) {
+                fwrite(rp, 1, rl, stdout);
+                if (rp[rl-1] != '\n') putchar('\n');
+            }
             free(rp);
         }
     } else {
         printf("%lld %s %zu\n", (long long)id,
                to_server ? ">>" : "<<", n);
-        if (n > 0) fwrite(buf, 1, n, stdout);
+        if (n > 0) {
+            fwrite(buf, 1, n, stdout);
+            const unsigned char *b = buf;
+            if (b[n-1] != '\n') putchar('\n');
+        }
     }
     fflush(stdout);
     pthread_mutex_unlock(&g_out_mu);
