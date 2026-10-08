@@ -3,3 +3,4 @@ mitmssl
 ca.key
 ca.crt
 logs/
+__pycache__/
