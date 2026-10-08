@@ -117,24 +117,38 @@ REDIRECT rule.
 
 ### Same machine as the client (loopback)
 
-When mitmssl listens on `127.0.0.1` on the client machine, only the
-`OUTPUT` rule applies: locally generated traffic never traverses
+When mitmssl listens on the loopback of the client machine, only the
+`OUTPUT` rules apply: locally generated traffic never traverses
 `PREROUTING`. A `PREROUTING` rule is useless in this setup.
 
+The proxy listens on both `127.0.0.1` and `[::1]` (when IPv6 is
+available). Most systems prefer IPv6 when the network allows it, so
+**without the ip6tables rule the traffic silently bypasses the proxy**.
+Post the rules in both families:
+
     ./mitmssl -t -l 8443
-    iptables -t nat -A OUTPUT -p tcp --dport 443 -m owner ! --uid-owner mitmssl \
+    iptables  -t nat -A OUTPUT -p tcp --dport 443 -m owner ! --uid-owner mitmssl \
         -j REDIRECT --to-port 8443
+    ip6tables -t nat -A OUTPUT -p tcp --dport 443 -m owner ! --uid-owner mitmssl \
+        -j REDIRECT --to-port 8443
+
+To force IPv4-only during tests, use `curl -4` or equivalent.
 
 ### NAT gateway
 
-On a gateway forwarding client traffic, both rules are needed:
+On a gateway forwarding client traffic, both chains are needed:
 `PREROUTING` for forwarded client traffic, `OUTPUT` (with the uid
-exclusion) for the proxy's own upstream connections.
+exclusion) for the proxy's own upstream connections. Repeat in both
+address families if the network carries IPv6:
 
     ./mitmssl -t -l 8443
-    iptables -t nat -A PREROUTING -i eth0 -p tcp --dport 443 \
+    iptables  -t nat -A PREROUTING -i eth0 -p tcp --dport 443 \
         -j REDIRECT --to-port 8443
-    iptables -t nat -A OUTPUT -p tcp --dport 443 -m owner ! --uid-owner mitmssl \
+    iptables  -t nat -A OUTPUT -p tcp --dport 443 -m owner ! --uid-owner mitmssl \
+        -j REDIRECT --to-port 8443
+    ip6tables -t nat -A PREROUTING -i eth0 -p tcp --dport 443 \
+        -j REDIRECT --to-port 8443
+    ip6tables -t nat -A OUTPUT -p tcp --dport 443 -m owner ! --uid-owner mitmssl \
         -j REDIRECT --to-port 8443
 
 ### Avoiding the redirection loop (critical)
@@ -189,7 +203,9 @@ binary bodies; other protocols are heuristically dumped.
 - Only http/1.1 is relayed (ALPN: h2 is refused, see ALPN handling).
 - No session resumption on the client side.
 - The proxy binds to loopback only.
-- Transparent mode requires Linux Netfilter NAT (`SO_ORIGINAL_DST`).
+- Transparent mode requires Linux Netfilter NAT (`SO_ORIGINAL_DST` /
+  `IP6T_SO_ORIGINAL_DST`); both IPv4 and IPv6 are supported. If IPv6
+  is unavailable, the proxy logs it and serves IPv4 only.
 
 ## Load testing
 

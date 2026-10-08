@@ -150,9 +150,10 @@ int main(int argc, char **argv)
         SSL_CTX_set_verify(g_server_ctx, SSL_VERIFY_PEER, NULL);
     }
 
+    int one = 1;
+
     int lfd = socket(AF_INET, SOCK_STREAM, 0);
     if (lfd < 0) { perror("socket"); return 1; }
-    int one = 1;
     setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 
     struct sockaddr_in addr;
@@ -170,14 +171,44 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    int lfd6 = socket(AF_INET6, SOCK_STREAM, 0);
+    if (lfd6 >= 0) {
+        setsockopt(lfd6, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        setsockopt(lfd6, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof(one));
+        struct sockaddr_in6 addr6;
+        memset(&addr6, 0, sizeof(addr6));
+        addr6.sin6_family = AF_INET6;
+        addr6.sin6_addr = in6addr_loopback;
+        addr6.sin6_port = htons((uint16_t)port);
+        if (bind(lfd6, (struct sockaddr *)&addr6, sizeof(addr6)) == 0
+            && listen(lfd6, 64) == 0) {
+            fprintf(stderr, APP_NAME ": listening on [::1]:%d\n", port);
+        } else {
+            perror("bind ipv6");
+            close(lfd6);
+            lfd6 = -1;
+        }
+    }
+
     fprintf(stderr, APP_NAME ": listening on 127.0.0.1:%d\n", port);
 
+    int maxfd = (lfd > lfd6 ? lfd : lfd6) + 1;
     while (!is_stopping()) {
-        int cfd = accept(lfd, NULL, NULL);
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(lfd, &rfds);
+        if (lfd6 >= 0) FD_SET(lfd6, &rfds);
+        if (select(maxfd, &rfds, NULL, NULL, NULL) < 0) {
+            if (errno == EINTR) continue;
+            perror("select");
+            break;
+        }
+        int cfd = -1;
+        if (FD_ISSET(lfd, &rfds)) cfd = accept(lfd, NULL, NULL);
+        else if (lfd6 >= 0 && FD_ISSET(lfd6, &rfds)) cfd = accept(lfd6, NULL, NULL);
         if (cfd < 0) {
             if (errno == EINTR) continue;
-            perror("accept");
-            break;
+            continue;
         }
         struct thread_arg *ta = malloc(sizeof(*ta));
         if (!ta) { close(cfd); continue; }
@@ -192,5 +223,6 @@ int main(int argc, char **argv)
     }
 
     close(lfd);
+    if (lfd6 >= 0) close(lfd6);
     return 0;
 }

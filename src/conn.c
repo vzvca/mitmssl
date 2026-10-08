@@ -8,6 +8,7 @@
 #include <time.h>
 #ifdef __linux__
 #include <linux/netfilter_ipv4.h>
+#include <linux/netfilter_ipv6/ip6_tables.h>
 #endif
 
 #define BUF_SIZE 16384
@@ -230,6 +231,16 @@ static int do_direct_tls(struct thread_arg *ta, char *host, uint16_t port)
 
 static int get_original_dst(int fd, char *host, size_t hostcap, uint16_t *port)
 {
+    struct sockaddr_in6 sa6;
+    socklen_t len6 = sizeof(sa6);
+    if (getsockopt(fd, SOL_IPV6, IP6T_SO_ORIGINAL_DST, &sa6, &len6) == 0
+        && sa6.sin6_family == AF_INET6) {
+        if (!inet_ntop(AF_INET6, &sa6.sin6_addr, host, (socklen_t)hostcap))
+            return -1;
+        *port = ntohs(sa6.sin6_port);
+        return 0;
+    }
+
     struct sockaddr_in sa;
     socklen_t len = sizeof(sa);
     if (getsockopt(fd, SOL_IP, SO_ORIGINAL_DST, &sa, &len) != 0)

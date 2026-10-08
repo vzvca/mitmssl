@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <pthread.h>
+#include <sys/select.h>
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
