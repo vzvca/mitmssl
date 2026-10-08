@@ -89,6 +89,7 @@ int main(int argc, char **argv)
     SSL_CTX_set_min_proto_version(g_client_ctx, TLS1_2_VERSION);
     SSL_CTX_set_tlsext_servername_callback(g_client_ctx,
                                             server_name_callback);
+    SSL_CTX_set_alpn_select_cb(g_client_ctx, alpn_select_cb, NULL);
     SSL_CTX_use_PrivateKey(g_client_ctx, g_leaf_key);
 
     g_server_ctx = SSL_CTX_new(TLS_client_method());

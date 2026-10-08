@@ -78,6 +78,20 @@ static int read_line_crlf(int fd, char *buf, size_t cap, size_t *out_len)
     return -1;
 }
 
+static const unsigned char ALPN_HTTP11[] = "\x08" "http/1.1";
+
+int alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen,
+                  const unsigned char *in, unsigned int inlen, void *arg)
+{
+    (void)ssl; (void)arg;
+    if (SSL_select_next_proto((unsigned char **)out, outlen,
+                              in, inlen, ALPN_HTTP11,
+                              sizeof(ALPN_HTTP11) - 1)
+            == OPENSSL_NPN_NEGOTIATED)
+        return SSL_TLSEXT_ERR_OK;
+    return SSL_TLSEXT_ERR_NOACK;
+}
+
 static int g_host_idx = -1;
 
 static void host_idx_init(void)
@@ -129,6 +143,7 @@ static int do_direct_tls(struct thread_arg *ta, char *host, uint16_t port)
     SSL_set_fd(srv, rfd);
     SSL_set_connect_state(srv);
     SSL_set_tlsext_host_name(srv, sni);
+    SSL_set_alpn_protos(srv, ALPN_HTTP11, sizeof(ALPN_HTTP11) - 1);
     if (SSL_connect(srv) <= 0) {
         ERR_print_errors_fp(stderr);
         SSL_free(srv);
@@ -139,7 +154,10 @@ static int do_direct_tls(struct thread_arg *ta, char *host, uint16_t port)
 
     struct conn_log *lg = calloc(1, sizeof(*lg));
     if (!lg) return -1;
-    lg->id = output_open_flow(sni, port);
+    const unsigned char *alpn = NULL;
+    unsigned int alpn_len = 0;
+    SSL_get0_alpn_selected(cli, &alpn, &alpn_len);
+    lg->id = output_open_flow(sni, port, (const char *)alpn, alpn_len);
     if (g_mime) {
         lg->insp_c2s = inspect_new();
         lg->insp_s2c = inspect_new();

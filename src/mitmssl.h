@@ -48,12 +48,15 @@ void inspect_free(struct inspect_ctx *ic);
 void inspect_write(struct inspect_ctx *ic, FILE *f,
                    const unsigned char *buf, size_t n);
 
-int64_t output_open_flow(const char *host, uint16_t port);
+int64_t output_open_flow(const char *host, uint16_t port,
+                         const char *alpn, size_t alpn_len);
 void output_data(int64_t id, int to_server,
                  const void *buf, size_t n, struct inspect_ctx *ic);
 void output_eof(int64_t id);
 
 int  server_name_callback(SSL *ssl, int *al, void *arg);
+int  alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen,
+                   const unsigned char *in, unsigned int inlen, void *arg);
 void stop_all(int sig);
 int  is_stopping(void);
 

@@ -15,6 +15,8 @@ client --TLS--> mitmssl --TLS--> real server
 ```
 
 - Listens on `127.0.0.1:8080` (configurable) as an HTTP `CONNECT` proxy.
+- ALPN-aware: selects `http/1.1` with the client, restricts the upstream
+to `http/1.1`, and reports the negotiated protocol per flow.
 - Generates a root CA (`ca.key` / `ca.crt`) on first run, reuses it afterwards.
 - For each tunnel, reads the SNI (or the CONNECT host), forges a leaf
   certificate signed by the CA, completes the handshake with the client, then
@@ -60,7 +62,7 @@ tool, ...).
 
 Text framing (default):
 
-    # 7 OPEN example.com:443
+    # 7 OPEN example.com:443 alpn=http/1.1
     7 >> 122
     <122 raw bytes, client to server>
     7 << 139
@@ -80,8 +82,19 @@ header followed by `sz` payload bytes:
         /* uint8_t data[sz]; */
     };
 
-The OPEN payload is the destination `host:port` string. IN/OUT payloads are
+The OPEN payload is the destination `host:port` string, optionally followed
+by ` alpn=<proto>` when the client negotiated ALPN. IN/OUT payloads are
 raw decoded bytes. EOF has sz=0. Fields are native-endian int32.
+
+## ALPN handling
+
+The proxy advertises and selects `http/1.1` only, both toward the client
+and toward the upstream server. Clients offering `h2` fall back to
+`http/1.1` (or to no ALPN if they offer none); the connection fails only
+if the client requires `h2` exclusively. The negotiated protocol is
+reported in the OPEN frame (`alpn=http/1.1` in text mode, suffix in the
+OPEN payload in binary mode). Relaying HTTP/2 would require HPACK
+re-encoding and is not implemented.
 
 Example (transparent mode, on the NAT gateway):
 
@@ -147,7 +160,7 @@ binary bodies; other protocols are heuristically dumped.
 
 ## Limitations
 
-- HTTP/1.x only (ALPN `h2` is not negotiated upstream).
+- Only http/1.1 is relayed (ALPN: h2 is refused, see ALPN handling).
 - No session resumption on the client side.
 - The proxy binds to loopback only.
 - Transparent mode requires Linux Netfilter NAT (`SO_ORIGINAL_DST`) and

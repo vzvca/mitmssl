@@ -12,19 +12,29 @@ enum {
 static pthread_mutex_t g_out_mu = PTHREAD_MUTEX_INITIALIZER;
 static atomic_llong g_flow_seq = 0;
 
-int64_t output_open_flow(const char *host, uint16_t port)
+int64_t output_open_flow(const char *host, uint16_t port,
+                         const char *alpn, size_t alpn_len)
 {
     int64_t id = atomic_fetch_add(&g_flow_seq, 1) + 1;
 
     pthread_mutex_lock(&g_out_mu);
     if (g_binary) {
-        char data[256];
-        int sz = snprintf(data, sizeof(data), "%s:%u", host, port);
+        char data[300];
+        int sz;
+        if (alpn_len > 0)
+            sz = snprintf(data, sizeof(data), "%s:%u alpn=%.*s",
+                          host, port, (int)alpn_len, alpn);
+        else
+            sz = snprintf(data, sizeof(data), "%s:%u", host, port);
         int32_t hdr[3] = { OP_OPEN, sz, (int32_t)id };
         fwrite(hdr, sizeof(hdr), 1, stdout);
         fwrite(data, 1, (size_t)sz, stdout);
     } else {
-        printf("# %lld OPEN %s:%u\n", (long long)id, host, port);
+        if (alpn_len > 0)
+            printf("# %lld OPEN %s:%u alpn=%.*s\n",
+                   (long long)id, host, port, (int)alpn_len, alpn);
+        else
+            printf("# %lld OPEN %s:%u\n", (long long)id, host, port);
     }
     fflush(stdout);
     pthread_mutex_unlock(&g_out_mu);
