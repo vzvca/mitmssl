@@ -62,6 +62,30 @@ Example (transparent mode, on the NAT gateway):
     iptables -t nat -A OUTPUT -p tcp --dport 443 -m owner ! --uid-owner mitmssl \
         -j REDIRECT --to-port 8443
 
+### Avoiding the redirection loop (critical)
+
+Without a guard, the packets mitmssl itself sends to the real servers
+(destination port 443) are redirected back to mitmssl: the proxy would
+connect to itself in an infinite loop. The `-m owner ! --uid-owner mitmssl`
+rule on `OUTPUT` prevents this: Netfilter matches the uid of the emitting
+socket, so the proxy's own traffic is exempted.
+
+This requires a dedicated user and running the proxy under it:
+
+    useradd -r -s /usr/sbin/nologin mitmssl
+    sudo -u mitmssl ./mitmssl -t -l 8443 -c logs
+
+Notes:
+
+- On the same machine as the client, only the `OUTPUT` rule applies
+  (locally generated traffic never traverses `PREROUTING`); the proxy
+  MUST run under the dedicated uid or the loop occurs.
+- On a gateway, both rules are needed: `PREROUTING` for forwarded
+  client traffic, `OUTPUT` (with the uid exclusion) for the proxy's own
+  upstream connections.
+- If the proxy must run as root, exclude its traffic by cgroup mark
+  (`net_cls` + `--mark`) instead of uid.
+
 Install `ca.crt` in the client trust store so forged certificates are
 accepted. Do not disable certificate verification on the client instead.
 
