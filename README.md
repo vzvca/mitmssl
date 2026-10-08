@@ -25,9 +25,15 @@ to `http/1.1`, and reports the negotiated protocol per flow.
 
 ## Build
 
-Requires OpenSSL development headers and lib (1.1.1 or 3.x):
+OpenSSL 3.5.7 is bundled as a git submodule and linked statically
+(no runtime dependency on the system OpenSSL; works on older distros
+such as Debian 11):
 
+    git submodule update --init
     make
+
+The first build compiles OpenSSL once (a few minutes); subsequent builds
+only relink mitmssl. `make distclean` also cleans the OpenSSL tree.
 
 ## Usage
 
