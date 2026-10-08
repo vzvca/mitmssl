@@ -157,6 +157,22 @@ Notes:
 Install `ca.crt` in the client trust store so forged certificates are
 accepted. Do not disable certificate verification on the client instead.
 
+## Load testing
+
+`scripts/loadtest.py` drives simultaneous CONNECT tunnels through the
+proxy against real hosts (a few hundred bytes per client, no heavy
+traffic):
+
+    ./mitmssl -l 3333 > /dev/null 2> mitmssl.err &
+    python3 scripts/loadtest.py -p 3333 -c 50 -n 200 --ca ca.crt \
+        --hosts github.com,www.google.com
+
+`-c` is the number of concurrent clients, `-n` the total number of
+tunnels. The script validates the forged certificates, sends one HTTP
+request per tunnel, and reports success rate, latency percentiles and
+error categories. Add `-b` to the proxy to also verify binary frame
+integrity under concurrency.
+
 ## Protocol-agnostic inspection
 
 The proxy only terminates TLS and relays bytes; it does not assume HTTP.
