@@ -37,27 +37,33 @@ only relink mitmssl. `make distclean` also cleans the OpenSSL tree.
 
 ## Usage
 
-    ./mitmssl [-l PORT] [-k] [-m] [-b] [-t] [-C KEY,CERT]
+    ./mitmssl [-l PORT] [-k] [-m | -b] [-t] [-A PATH] [-C KEY,CERT]
 
 - `-l PORT` listen port (default 8080)
 - `-k`       skip upstream certificate verification (debug only)
-- `-m`       MIME-aware rendering: decode HTTP framing; dump text bodies as-is,
-  hexdump binary bodies (`image/*`, `audio/*`, `video/*`, `application/...`);
-  non-HTTP flows fall back to a printable-ratio heuristic
+- `-m`       MIME-aware rendering (text mode only): decode HTTP framing;
+  dump text bodies as-is, hexdump binary bodies (`image/*`, `audio/*`,
+  `video/*`, `application/...`); non-HTTP flows fall back to a
+  printable-ratio heuristic
 - `-b`       binary framing (see below) instead of text framing
-- `-t`       transparent mode: recover the destination with
-  `SO_ORIGINAL_DST` (Linux Netfilter NAT) instead of parsing a `CONNECT`
-  request; pairs with an iptables/nftables redirect rule
-- `-t`       transparent mode: recover the destination with
-  `SO_ORIGINAL_DST` (Linux Netfilter NAT) instead of parsing a `CONNECT`
-  request; pairs with an iptables/nftables redirect rule
+- `-t`       transparent mode (see the Transparent mode section)
+- `-A PATH`  trust store for upstream verification: a bundle file (e.g.
+  `/etc/ssl/certs/ca-certificates.crt`) or a hashed directory (e.g.
+  `/etc/ssl/certs`); by default the system locations are probed
 - `-C KEY,CERT` CA key and cert paths (default `ca.key,ca.crt`,
   generated if missing)
+
+`-m` and `-b` are mutually exclusive: `-m` renders payloads for human
+reading, while `-b` emits raw bytes for machine consumers. The program
+rejects the combination.
 
 Example (explicit proxy mode):
 
     ./mitmssl -l 8080 | tee capture.txt
     curl -x http://127.0.0.1:8080 --cacert ca.crt https://example.com/
+
+Install `ca.crt` in the client trust store so forged certificates are
+accepted. Do not disable certificate verification on the client instead.
 
 ## Output framing
 
@@ -102,7 +108,28 @@ reported in the OPEN frame (`alpn=http/1.1` in text mode, suffix in the
 OPEN payload in binary mode). Relaying HTTP/2 would require HPACK
 re-encoding and is not implemented.
 
-Example (transparent mode, on the NAT gateway):
+## Transparent mode
+
+With `-t`, mitmssl does not parse a `CONNECT` request: it expects raw TLS
+connections and recovers the destination with `SO_ORIGINAL_DST`
+(Linux Netfilter NAT). It therefore runs behind an iptables/nftables
+REDIRECT rule.
+
+### Same machine as the client (loopback)
+
+When mitmssl listens on `127.0.0.1` on the client machine, only the
+`OUTPUT` rule applies: locally generated traffic never traverses
+`PREROUTING`. A `PREROUTING` rule is useless in this setup.
+
+    ./mitmssl -t -l 8443
+    iptables -t nat -A OUTPUT -p tcp --dport 443 -m owner ! --uid-owner mitmssl \
+        -j REDIRECT --to-port 8443
+
+### NAT gateway
+
+On a gateway forwarding client traffic, both rules are needed:
+`PREROUTING` for forwarded client traffic, `OUTPUT` (with the uid
+exclusion) for the proxy's own upstream connections.
 
     ./mitmssl -t -l 8443
     iptables -t nat -A PREROUTING -i eth0 -p tcp --dport 443 \
@@ -123,61 +150,32 @@ This requires a dedicated user and running the proxy under it:
     useradd -r -s /usr/sbin/nologin mitmssl
     sudo -u mitmssl ./mitmssl -t -l 8443
 
-Notes:
+The proxy MUST run under the dedicated uid, or the loop occurs.
 
-- On the same machine as the client, only the `OUTPUT` rule applies
-  (locally generated traffic never traverses `PREROUTING`); the proxy
-  MUST run under the dedicated uid or the loop occurs.
-- On a gateway, both rules are needed: `PREROUTING` for forwarded
-  client traffic, `OUTPUT` (with the uid exclusion) for the proxy's own
-  upstream connections.
-- If the proxy must run as root, exclude its traffic by cgroup instead of
-  uid. Two options:
+### Excluding by cgroup instead of uid (root daemons)
 
-  cgroup v1 (`net_cls`):
+If the proxy must run as root, exclude its traffic by cgroup instead of
+uid. Two options:
 
-      mkdir /sys/fs/cgroup/net_cls/mitmssl
-      echo 0x0001 > /sys/fs/cgroup/net_cls/mitmssl/net_cls.classid
-      echo $$ > /sys/fs/cgroup/net_cls/mitmssl/tasks
-      ./mitmssl -t -l 8443
-      iptables -t nat -A OUTPUT -p tcp --dport 443 -m mark ! --mark 1 \
-          -j REDIRECT --to-port 8443
+cgroup v1 (`net_cls`):
 
-  cgroup v2 (match by path, e.g. under systemd):
+    mkdir /sys/fs/cgroup/net_cls/mitmssl
+    echo 0x0001 > /sys/fs/cgroup/net_cls/mitmssl/net_cls.classid
+    echo $$ > /sys/fs/cgroup/net_cls/mitmssl/tasks
+    ./mitmssl -t -l 8443
+    iptables -t nat -A OUTPUT -p tcp --dport 443 -m mark ! --mark 1 \
+        -j REDIRECT --to-port 8443
 
-      systemd-run --unit=mitmssl --slice=mitmssl.slice \
-          ./mitmssl -t -l 8443
-      iptables -t nat -A OUTPUT -p tcp --dport 443 \
-          -m cgroup ! --path mitmssl.slice \
-          -j REDIRECT --to-port 8443
+cgroup v2 (match by path, e.g. under systemd):
 
-  With `-m mark ! --mark 1`, packets carrying no mark also match the
-  negation, so make sure nothing else uses class 1.
+    systemd-run --unit=mitmssl --slice=mitmssl.slice \
+        ./mitmssl -t -l 8443
+    iptables -t nat -A OUTPUT -p tcp --dport 443 \
+        -m cgroup ! --path mitmssl.slice \
+        -j REDIRECT --to-port 8443
 
-Install `ca.crt` in the client trust store so forged certificates are
-accepted. Do not disable certificate verification on the client instead.
-
-## Load testing
-
-`scripts/loadtest.py` drives simultaneous CONNECT tunnels through the
-proxy against real hosts (a few hundred bytes per client, no heavy
-traffic):
-
-    ./mitmssl -l 3333 > /dev/null 2> mitmssl.err &
-    python3 scripts/loadtest.py -p 3333 -c 50 -n 200 --ca ca.crt \
-        --hosts github.com,www.google.com
-
-For transparent mode, run the proxy with `-t` behind the iptables
-REDIRECT rule (see above), then add `--transparent` to the script:
-clients then send raw TLS straight to the proxy port, as the NAT would
-deliver it. Without the NAT rule in place the proxy cannot recover the
-destination and closes the connections immediately.
-
-`-c` is the number of concurrent clients, `-n` the total number of
-tunnels. The script validates the forged certificates, sends one HTTP
-request per tunnel, and reports success rate, latency percentiles and
-error categories. Add `-b` to the proxy to also verify binary frame
-integrity under concurrency.
+With `-m mark ! --mark 1`, packets carrying no mark also match the
+negation, so make sure nothing else uses class 1.
 
 ## Protocol-agnostic inspection
 
@@ -191,8 +189,28 @@ binary bodies; other protocols are heuristically dumped.
 - Only http/1.1 is relayed (ALPN: h2 is refused, see ALPN handling).
 - No session resumption on the client side.
 - The proxy binds to loopback only.
-- Transparent mode requires Linux Netfilter NAT (`SO_ORIGINAL_DST`) and
-  typically runs on the gateway as root.
+- Transparent mode requires Linux Netfilter NAT (`SO_ORIGINAL_DST`).
+
+## Load testing
+
+`scripts/loadtest.py` drives simultaneous tunnels through the proxy
+against real hosts (a few hundred bytes per client, no heavy traffic):
+
+    ./mitmssl -l 3333 > /dev/null 2> mitmssl.err &
+    python3 scripts/loadtest.py -p 3333 -c 50 -n 200 --ca ca.crt \
+        --hosts github.com,www.google.com
+
+`-c` is the number of concurrent clients, `-n` the total number of
+tunnels. The script validates the forged certificates, sends one HTTP
+request per tunnel, and reports success rate, latency percentiles and
+error categories. Add `-b` to the proxy to also verify binary frame
+integrity under concurrency.
+
+For transparent mode, run the proxy with `-t` behind the iptables
+REDIRECT rule (see Transparent mode), then add `--transparent` to the
+script: clients then send raw TLS straight to the proxy port, as the NAT
+would deliver it. Without the NAT rule in place the proxy cannot recover
+the destination and closes the connections immediately.
 
 ## License
 

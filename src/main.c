@@ -75,6 +75,11 @@ int main(int argc, char **argv)
                                         with EINTR so the loop can exit */
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
+    if (g_mime && g_binary) {
+        fprintf(stderr, APP_NAME ": -m and -b are mutually exclusive\n");
+        return 1;
+    }
+
     signal(SIGPIPE, SIG_IGN);
 
     if (ca_load(ca_key, ca_cert) != 0) {
