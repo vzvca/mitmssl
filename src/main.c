@@ -158,7 +158,8 @@ int main(int argc, char **argv)
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_addr.s_addr = g_transparent ? htonl(INADDR_ANY)
+                                        : htonl(INADDR_LOOPBACK);
     addr.sin_port = htons((uint16_t)port);
 
     if (bind(lfd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
@@ -177,11 +178,12 @@ int main(int argc, char **argv)
         struct sockaddr_in6 addr6;
         memset(&addr6, 0, sizeof(addr6));
         addr6.sin6_family = AF_INET6;
-        addr6.sin6_addr = in6addr_loopback;
+        addr6.sin6_addr = g_transparent ? in6addr_any : in6addr_loopback;
         addr6.sin6_port = htons((uint16_t)port);
         if (bind(lfd6, (struct sockaddr *)&addr6, sizeof(addr6)) == 0
             && listen(lfd6, 64) == 0) {
-            fprintf(stderr, APP_NAME ": listening on [::1]:%d\n", port);
+            fprintf(stderr, APP_NAME ": listening on [%s]:%d\n",
+                    g_transparent ? "::" : "::1", port);
         } else {
             perror("bind ipv6");
             close(lfd6);
@@ -189,7 +191,8 @@ int main(int argc, char **argv)
         }
     }
 
-    fprintf(stderr, APP_NAME ": listening on 127.0.0.1:%d\n", port);
+    fprintf(stderr, APP_NAME ": listening on %s:%d\n",
+            g_transparent ? "0.0.0.0" : "127.0.0.1", port);
 
     int maxfd = (lfd > lfd6 ? lfd : lfd6) + 1;
     while (!is_stopping()) {

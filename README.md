@@ -168,9 +168,18 @@ re-encoding and is not implemented.
 ## Transparent mode
 
 With `-t`, mitmssl does not parse a `CONNECT` request: it expects raw TLS
-connections and recovers the destination with `SO_ORIGINAL_DST`
-(Linux Netfilter NAT). It therefore runs behind an iptables/nftables
-REDIRECT rule.
+connections and recovers the destination with `SO_ORIGINAL_DST` /
+`IP6T_SO_ORIGINAL_DST` (Linux Netfilter NAT). It therefore runs behind
+an iptables/nftables REDIRECT rule.
+
+In transparent mode the proxy listens on the wildcard addresses
+(`0.0.0.0` and `::`) instead of the loopback: REDIRECT may rewrite the
+destination to any local address chosen by the kernel (the interface
+address for locally generated IPv6 traffic, the incoming interface
+address on a gateway), not to `[::1]`/`127.0.0.1`. Proxy mode keeps
+the loopback-only listeners. Restrict external access to the
+transparent port with the firewall (e.g. accept only REDIRECTed
+traffic, drop direct connections to 8443 from other hosts).
 
 ### Same machine as the client (loopback)
 
