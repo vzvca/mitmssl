@@ -226,19 +226,27 @@ cgroup v1 (`net_cls`):
     echo 0x0001 > /sys/fs/cgroup/net_cls/mitmssl/net_cls.classid
     echo $$ > /sys/fs/cgroup/net_cls/mitmssl/tasks
     ./mitmssl -t -l 8443
-    iptables -t nat -A OUTPUT -p tcp --dport 443 -m mark ! --mark 1 \
+    iptables  -t nat -A OUTPUT -p tcp --dport 443 -m mark ! --mark 1 \
+        -j REDIRECT --to-port 8443
+    ip6tables -t nat -A OUTPUT -p tcp --dport 443 -m mark ! --mark 1 \
         -j REDIRECT --to-port 8443
 
 cgroup v2 (match by path, e.g. under systemd):
 
     systemd-run --unit=mitmssl --slice=mitmssl.slice \
         ./mitmssl -t -l 8443
-    iptables -t nat -A OUTPUT -p tcp --dport 443 \
+    iptables  -t nat -A OUTPUT -p tcp --dport 443 \
+        -m cgroup ! --path mitmssl.slice \
+        -j REDIRECT --to-port 8443
+    ip6tables -t nat -A OUTPUT -p tcp --dport 443 \
         -m cgroup ! --path mitmssl.slice \
         -j REDIRECT --to-port 8443
 
 With `-m mark ! --mark 1`, packets carrying no mark also match the
-negation, so make sure nothing else uses class 1.
+negation, so make sure nothing else uses class 1. The ip6tables rules
+are required as soon as the network carries IPv6, or the proxy's own
+IPv6 upstream traffic loops back into itself (same guard, same pitfall,
+in both address families).
 
 ## Protocol-agnostic inspection
 
