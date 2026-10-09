@@ -371,9 +371,12 @@ static int get_original_dst(int fd, char *host, size_t hostcap, uint16_t *port)
 
 static int do_transparent(struct thread_arg *ta)
 {
-    char host[INET_ADDRSTRLEN];
+    char host[INET6_ADDRSTRLEN];
     uint16_t port;
     if (get_original_dst(ta->fd, host, sizeof(host), &port) != 0) {
+        fprintf(stderr,
+                APP_NAME ": cannot recover original destination "
+                         "(not NATed, or unsupported family)\n");
         close(ta->fd);
         free(ta);
         return -1;
