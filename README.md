@@ -2,10 +2,13 @@
 
 SSL interception proxy for inspection, written in C with OpenSSL.
 
-This program and its documentation were written from A to Z by
-mistral-vibe (Mistral AI's coding agent, powered by the GLM model),
-under human supervision: the project owner defined the goals and
-reviewed, tested and merged each step.
+> [!NOTE]
+> **About the authorship**
+>
+> This program and its documentation were written from A to Z by
+> **mistral-vibe** (Mistral AI's coding agent, powered by the GLM model),
+> under human supervision: the project owner defined the goals and
+> reviewed, tested and merged each step.
 
 mitmssl terminates TLS on the client side, opens a real TLS connection to the
 upstream server, and forges on the fly a certificate for the emulated server,
