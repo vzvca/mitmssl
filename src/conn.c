@@ -3,8 +3,13 @@
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <signal.h>
 #include <time.h>
+#ifdef __linux__
+#include <linux/netfilter_ipv4.h>
+#include <linux/netfilter_ipv6/ip6_tables.h>
+#endif
 
 #define BUF_SIZE 16384
 
@@ -21,19 +26,38 @@ int is_stopping(void)
     return g_stop;
 }
 
+void log_free(struct conn_log *lg)
+{
+    if (!lg) return;
+    if (lg->insp_c2s) inspect_free(lg->insp_c2s);
+    if (lg->insp_s2c) inspect_free(lg->insp_s2c);
+    free(lg);
+}
+
 static int connect_remote(const char *host, uint16_t port)
 {
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons(port);
-    if (inet_pton(AF_INET, host, &sa.sin_addr) != 1) return -1;
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-    if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
-        close(fd);
+    struct addrinfo hints, *res = NULL, *ai;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    char portstr[8];
+    snprintf(portstr, sizeof(portstr), "%u", port);
+
+    if (getaddrinfo(host, portstr, &hints, &res) != 0)
         return -1;
+
+    int fd = -1;
+    for (ai = res; ai; ai = ai->ai_next) {
+        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) continue;
+        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0)
+            break;
+        close(fd);
+        fd = -1;
     }
+    freeaddrinfo(res);
     return fd;
 }
 
@@ -65,6 +89,20 @@ static int read_line_crlf(int fd, char *buf, size_t cap, size_t *out_len)
         buf[len++] = c;
     }
     return -1;
+}
+
+static const unsigned char ALPN_HTTP11[] = "\x08" "http/1.1";
+
+int alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen,
+                  const unsigned char *in, unsigned int inlen, void *arg)
+{
+    (void)ssl; (void)arg;
+    if (SSL_select_next_proto((unsigned char **)out, outlen,
+                              in, inlen, ALPN_HTTP11,
+                              sizeof(ALPN_HTTP11) - 1)
+            == OPENSSL_NPN_NEGOTIATED)
+        return SSL_TLSEXT_ERR_OK;
+    return SSL_TLSEXT_ERR_NOACK;
 }
 
 static int g_host_idx = -1;
@@ -108,12 +146,14 @@ static int do_direct_tls(struct thread_arg *ta, char *host, uint16_t port)
     const char *sni = SSL_get_servername(cli, TLSEXT_NAMETYPE_host_name);
     if (!sni) sni = host;
 
-    char peer[256];
-    snprintf(peer, sizeof(peer), "%s:%u", sni, port);
-
     int rfd = connect_remote(host, port);
     if (rfd < 0) {
+        fprintf(stderr, APP_NAME ": cannot connect to upstream %s:%u\n",
+                host, port);
+        SSL_shutdown(cli);
         SSL_free(cli);
+        close(ta->fd);
+        free(ta);
         return -1;
     }
 
@@ -121,15 +161,34 @@ static int do_direct_tls(struct thread_arg *ta, char *host, uint16_t port)
     SSL_set_fd(srv, rfd);
     SSL_set_connect_state(srv);
     SSL_set_tlsext_host_name(srv, sni);
+    SSL_set_alpn_protos(srv, ALPN_HTTP11, sizeof(ALPN_HTTP11) - 1);
     if (SSL_connect(srv) <= 0) {
+        fprintf(stderr, APP_NAME ": upstream TLS handshake failed for %s:%u\n",
+                sni, port);
         ERR_print_errors_fp(stderr);
         SSL_free(srv);
+        SSL_shutdown(cli);
         SSL_free(cli);
         close(rfd);
+        close(ta->fd);
+        free(ta);
         return -1;
     }
 
-    struct conn_log *lg = log_open(sni, peer);
+    struct conn_log *lg = calloc(1, sizeof(*lg));
+    if (!lg) return -1;
+    const unsigned char *alpn = NULL;
+    unsigned int alpn_len = 0;
+    SSL_get0_alpn_selected(cli, &alpn, &alpn_len);
+    lg->id = output_open_flow(sni, port, (const char *)alpn, alpn_len);
+    if (g_mime) {
+        lg->insp_c2s = inspect_new();
+        lg->insp_s2c = inspect_new();
+        if (!lg->insp_c2s || !lg->insp_s2c) {
+            log_free(lg);
+            return -1;
+        }
+    }
 
     fd_set rfds;
     char buf[BUF_SIZE];
@@ -147,18 +206,19 @@ static int do_direct_tls(struct thread_arg *ta, char *host, uint16_t port)
         if (FD_ISSET(cfd, &rfds)) {
             int n = SSL_read(cli, buf, sizeof(buf));
             if (n <= 0) break;
-            log_write(lg, 1, buf, (size_t)n);
+            output_data(lg->id, 1, buf, (size_t)n, lg->insp_c2s);
             if (SSL_write(srv, buf, (size_t)n) <= 0) break;
         }
         if (FD_ISSET(rfd, &rfds)) {
             int n = SSL_read(srv, buf, sizeof(buf));
             if (n <= 0) break;
-            log_write(lg, 0, buf, (size_t)n);
+            output_data(lg->id, 0, buf, (size_t)n, lg->insp_s2c);
             if (SSL_write(cli, buf, (size_t)n) <= 0) break;
         }
     }
 
-    log_close(lg);
+    output_eof(lg->id);
+    log_free(lg);
     SSL_shutdown(srv);
     SSL_shutdown(cli);
     SSL_free(srv);
@@ -167,6 +227,40 @@ static int do_direct_tls(struct thread_arg *ta, char *host, uint16_t port)
     close(ta->fd);
     free(ta);
     return 0;
+}
+
+static int get_original_dst(int fd, char *host, size_t hostcap, uint16_t *port)
+{
+    struct sockaddr_in6 sa6;
+    socklen_t len6 = sizeof(sa6);
+    if (getsockopt(fd, SOL_IPV6, IP6T_SO_ORIGINAL_DST, &sa6, &len6) == 0
+        && sa6.sin6_family == AF_INET6) {
+        if (!inet_ntop(AF_INET6, &sa6.sin6_addr, host, (socklen_t)hostcap))
+            return -1;
+        *port = ntohs(sa6.sin6_port);
+        return 0;
+    }
+
+    struct sockaddr_in sa;
+    socklen_t len = sizeof(sa);
+    if (getsockopt(fd, SOL_IP, SO_ORIGINAL_DST, &sa, &len) != 0)
+        return -1;
+    if (!inet_ntop(AF_INET, &sa.sin_addr, host, (socklen_t)hostcap))
+        return -1;
+    *port = ntohs(sa.sin_port);
+    return 0;
+}
+
+static int do_transparent(struct thread_arg *ta)
+{
+    char host[INET_ADDRSTRLEN];
+    uint16_t port;
+    if (get_original_dst(ta->fd, host, sizeof(host), &port) != 0) {
+        close(ta->fd);
+        free(ta);
+        return -1;
+    }
+    return do_direct_tls(ta, host, port);
 }
 
 static int do_connect_proxy(struct thread_arg *ta)
@@ -208,6 +302,11 @@ static int do_connect_proxy(struct thread_arg *ta)
 void *conn_thread(void *arg)
 {
     struct thread_arg *ta = arg;
+
+    if (g_transparent) {
+        do_transparent(ta);
+        return NULL;
+    }
 
     char first[8];
     ssize_t r = recv(ta->fd, first, 1, MSG_PEEK);

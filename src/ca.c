@@ -5,8 +5,11 @@ X509     *g_ca_cert = NULL;
 EVP_PKEY *g_leaf_key = NULL;
 SSL_CTX  *g_client_ctx = NULL;
 SSL_CTX  *g_server_ctx = NULL;
-const char *g_logdir = ".";
 int g_insecure = 0;
+int g_transparent = 0;
+int g_mime = 0;
+int g_binary = 0;
+const char *g_ca_path = NULL;
 
 static void die(const char *msg)
 {
