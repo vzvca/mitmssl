@@ -18,9 +18,12 @@ client --TLS--> mitmssl --TLS--> real server
 - ALPN-aware: selects `http/1.1` with the client, restricts the upstream
 to `http/1.1`, and reports the negotiated protocol per flow.
 - Generates a root CA (`ca.key` / `ca.crt`) on first run, reuses it afterwards.
-- For each tunnel, reads the SNI (or the CONNECT host), forges a leaf
-  certificate signed by the CA, completes the handshake with the client, then
-  connects to the upstream server over TLS.
+- Choreographed handshakes: on the client's ClientHello, extracts the SNI,
+  connects to the upstream server first (with that SNI), reads its real
+  certificate, clones it (subject, SANs, extensions) signed by the local CA,
+  and serves the clone to the client. In transparent mode without SNI, the
+  upstream's default certificate is cloned. Every handshake step is
+  reported on stdout (see Handshake trace).
 - Relays the decoded traffic to stdout with per-flow framing (see below).
 
 ## Build
@@ -97,6 +100,35 @@ header followed by `sz` payload bytes:
 The OPEN payload is the destination `host:port` string, optionally followed
 by ` alpn=<proto>` when the client negotiated ALPN. IN/OUT payloads are
 raw decoded bytes. EOF has sz=0. Fields are native-endian int32.
+
+## Handshake trace
+
+The TLS choreography is reported step by step on stdout, in both framings.
+Text mode emits `-- ` lines; binary mode uses op 5 (STEP) frames:
+
+    # 1 OPEN example.com:443
+    1 -- client hello: sni=example.com
+    1 -- connecting to upstream example.com:443
+    1 -- upstream connected example.com:443
+    1 -- upstream TLS ok: TLSv1.3 cipher=TLS_AES_256_GCM_SHA384
+    1 -- cloned upstream cert: subject=example.com
+    1 -- client TLS ok: TLSv1.3 cipher=TLS_AES_256_GCM_SHA384 alpn=
+    1 >> 56
+    ...
+    1 ## EOF
+
+Failures are traced the same way (`upstream connect failed`, `upstream TLS
+handshake failed`, `client TLS handshake failed`), followed by EOF.
+
+## Certificate cloning
+
+The served certificate is a clone of the upstream server's real
+certificate: same subject, SANs and most extensions, but signed by the
+mitmssl CA and bound to the proxy's leaf key. This maximizes client
+compatibility (multi-SAN certificates, unusual EKUs) and handles the
+transparent case without SNI (the upstream's default certificate is
+cloned). Extensions that reference the real issuer's infrastructure
+(AIA/OCSP) are stripped, since they would break validation.
 
 ## ALPN handling
 
