@@ -44,6 +44,7 @@ int  ca_load(const char *keypath, const char *certpath);
 int  ca_generate(const char *keypath, const char *certpath);
 
 X509 *forge_cert(const char *host);
+X509 *clone_cert(X509 *orig, char *subject_out, size_t subject_cap);
 
 struct inspect_ctx *inspect_new(void);
 void inspect_free(struct inspect_ctx *ic);
@@ -55,8 +56,9 @@ int64_t output_open_flow(const char *host, uint16_t port,
 void output_data(int64_t id, int to_server,
                  const void *buf, size_t n, struct inspect_ctx *ic);
 void output_eof(int64_t id);
+void output_step(int64_t id, const char *fmt, ...);
 
-int  server_name_callback(SSL *ssl, int *al, void *arg);
+int  client_hello_cb(SSL *ssl, int *al, void *arg);
 int  alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen,
                    const unsigned char *in, unsigned int inlen, void *arg);
 void stop_all(int sig);

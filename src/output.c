@@ -1,12 +1,15 @@
 #include "mitmssl.h"
+#include "../mitmssl_frame.h"
 
 #include <stdatomic.h>
+#include <stdarg.h>
 
 enum {
-    OP_OPEN = 1,
-    OP_IN   = 2,
-    OP_OUT  = 3,
-    OP_EOF  = 4
+    OP_OPEN = MITMSSL_OP_OPEN,
+    OP_IN   = MITMSSL_OP_IN,
+    OP_OUT  = MITMSSL_OP_OUT,
+    OP_EOF  = MITMSSL_OP_EOF,
+    OP_STEP = MITMSSL_OP_STEP
 };
 
 static pthread_mutex_t g_out_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -90,6 +93,28 @@ void output_eof(int64_t id)
         fwrite(hdr, sizeof(hdr), 1, stdout);
     } else {
         printf("%lld ## EOF\n", (long long)id);
+    }
+    fflush(stdout);
+    pthread_mutex_unlock(&g_out_mu);
+}
+
+void output_step(int64_t id, const char *fmt, ...)
+{
+    char msg[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    if ((size_t)n >= sizeof(msg)) n = (int)sizeof(msg) - 1;
+
+    pthread_mutex_lock(&g_out_mu);
+    if (g_binary) {
+        int32_t hdr[3] = { OP_STEP, n, (int32_t)id };
+        fwrite(hdr, sizeof(hdr), 1, stdout);
+        fwrite(msg, 1, (size_t)n, stdout);
+    } else {
+        printf("%lld -- %s\n", (long long)id, msg);
     }
     fflush(stdout);
     pthread_mutex_unlock(&g_out_mu);

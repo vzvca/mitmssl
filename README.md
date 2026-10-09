@@ -2,6 +2,14 @@
 
 SSL interception proxy for inspection, written in C with OpenSSL.
 
+> [!NOTE]
+> **About the authorship**
+>
+> This program and its documentation were written from A to Z by
+> **mistral-vibe** (Mistral AI's coding agent, powered by the GLM model),
+> under human supervision: the project owner defined the goals and
+> reviewed, tested and merged each step.
+
 mitmssl terminates TLS on the client side, opens a real TLS connection to the
 upstream server, and forges on the fly a certificate for the emulated server,
 signed by a local CA whose key the proxy owns. The client must trust this CA.
@@ -18,9 +26,12 @@ client --TLS--> mitmssl --TLS--> real server
 - ALPN-aware: selects `http/1.1` with the client, restricts the upstream
 to `http/1.1`, and reports the negotiated protocol per flow.
 - Generates a root CA (`ca.key` / `ca.crt`) on first run, reuses it afterwards.
-- For each tunnel, reads the SNI (or the CONNECT host), forges a leaf
-  certificate signed by the CA, completes the handshake with the client, then
-  connects to the upstream server over TLS.
+- Choreographed handshakes: on the client's ClientHello, extracts the SNI,
+  connects to the upstream server first (with that SNI), reads its real
+  certificate, clones it (subject, SANs, extensions) signed by the local CA,
+  and serves the clone to the client. In transparent mode without SNI, the
+  upstream's default certificate is cloned. Every handshake step is
+  reported on stdout (see Handshake trace).
 - Relays the decoded traffic to stdout with per-flow framing (see below).
 
 ## Build
@@ -68,35 +79,81 @@ accepted. Do not disable certificate verification on the client instead.
 ## Output framing
 
 All decoded traffic is written to stdout, interleaved across concurrent
-flows; each frame carries the id of its flow (a monotonic counter, never
-reused). Use shell pipes to process the stream (`tee`, `grep`, your own
-tool, ...).
+flows; each frame carries the id of its flow (a per-process monotonic
+counter starting at 1, never reused). Use shell pipes to process the
+stream (`tee`, `grep`, your own tool, ...).
 
 Text framing (default):
 
     # 7 OPEN example.com:443 alpn=http/1.1
+    7 -- client hello: sni=example.com
+    7 -- upstream TLS ok: TLSv1.3 cipher=TLS_AES_256_GCM_SHA384
+    7 -- cloned upstream cert: subject=example.com
+    7 -- client TLS ok: TLSv1.3 cipher=TLS_AES_256_GCM_SHA384 alpn=http/1.1
     7 >> 122
     <122 raw bytes, client to server>
     7 << 139
     <139 raw bytes, server to client>
     7 ## EOF
 
-With `-m`, the payload of `>>`/`<<` frames is rendered (HTTP headers kept,
-text bodies as-is, binary bodies hexdumped) instead of raw bytes.
+`# ... OPEN` is emitted when the flow starts (destination known from
+the CONNECT request or SO_ORIGINAL_DST; the `alpn=` suffix appears once
+the client negotiates ALPN). `-- ...` lines are handshake and lifecycle
+steps (see Handshake trace). `>>`/`<<` carry the decoded application
+bytes; `## EOF` closes the flow. With `-m`, the payload of `>>`/`<<`
+frames is rendered (HTTP headers kept, text bodies as-is, binary bodies
+hexdumped) instead of raw bytes.
 
 Binary framing (`-b`), for machine consumers: each frame is a 12-byte
 header followed by `sz` payload bytes:
 
     struct frame {
-        int32_t op;   /* 1=OPEN, 2=IN (c2s), 3=OUT (s2c), 4=EOF */
+        int32_t op;   /* 1=OPEN, 2=IN (c2s), 3=OUT (s2c), 4=EOF, 5=STEP */
         int32_t sz;   /* payload size, may be 0 */
         int32_t id;   /* flow id, monotonic, never reused */
         /* uint8_t data[sz]; */
     };
 
-The OPEN payload is the destination `host:port` string, optionally followed
-by ` alpn=<proto>` when the client negotiated ALPN. IN/OUT payloads are
-raw decoded bytes. EOF has sz=0. Fields are native-endian int32.
+The OPEN payload is the destination `host:port` string (the `alpn=`
+suffix is appended once ALPN is negotiated). IN/OUT payloads are raw
+decoded bytes. EOF has sz=0. STEP payloads are human-readable step
+strings, same content as the text `--` lines. Fields are
+native-endian int32.
+
+The header `mitmssl_frame.h` at the repository root provides the
+authoritative definitions (frame header struct and op constants) for
+tools that consume the binary stream:
+
+    #include "mitmssl_frame.h"
+
+## Handshake trace
+
+The TLS choreography is reported step by step on stdout, in both framings.
+Text mode emits `-- ` lines; binary mode uses op 5 (STEP) frames:
+
+    # 1 OPEN example.com:443
+    1 -- client hello: sni=example.com
+    1 -- connecting to upstream example.com:443
+    1 -- upstream connected example.com:443
+    1 -- upstream TLS ok: TLSv1.3 cipher=TLS_AES_256_GCM_SHA384
+    1 -- cloned upstream cert: subject=example.com
+    1 -- client TLS ok: TLSv1.3 cipher=TLS_AES_256_GCM_SHA384 alpn=
+    1 >> 56
+    ...
+    1 ## EOF
+
+Failures are traced the same way (`upstream connect failed`, `upstream TLS
+handshake failed`, `client TLS handshake failed`), followed by EOF.
+
+## Certificate cloning
+
+The served certificate is a clone of the upstream server's real
+certificate: same subject, SANs and most extensions, but signed by the
+mitmssl CA and bound to the proxy's leaf key. This maximizes client
+compatibility (multi-SAN certificates, unusual EKUs) and handles the
+transparent case without SNI (the upstream's default certificate is
+cloned). Extensions that reference the real issuer's infrastructure
+(AIA/OCSP) are stripped, since they would break validation.
 
 ## ALPN handling
 
@@ -111,9 +168,18 @@ re-encoding and is not implemented.
 ## Transparent mode
 
 With `-t`, mitmssl does not parse a `CONNECT` request: it expects raw TLS
-connections and recovers the destination with `SO_ORIGINAL_DST`
-(Linux Netfilter NAT). It therefore runs behind an iptables/nftables
-REDIRECT rule.
+connections and recovers the destination with `SO_ORIGINAL_DST` /
+`IP6T_SO_ORIGINAL_DST` (Linux Netfilter NAT). It therefore runs behind
+an iptables/nftables REDIRECT rule.
+
+In transparent mode the proxy listens on the wildcard addresses
+(`0.0.0.0` and `::`) instead of the loopback: REDIRECT may rewrite the
+destination to any local address chosen by the kernel (the interface
+address for locally generated IPv6 traffic, the incoming interface
+address on a gateway), not to `[::1]`/`127.0.0.1`. Proxy mode keeps
+the loopback-only listeners. Restrict external access to the
+transparent port with the firewall (e.g. accept only REDIRECTed
+traffic, drop direct connections to 8443 from other hosts).
 
 ### Same machine as the client (loopback)
 
@@ -177,19 +243,27 @@ cgroup v1 (`net_cls`):
     echo 0x0001 > /sys/fs/cgroup/net_cls/mitmssl/net_cls.classid
     echo $$ > /sys/fs/cgroup/net_cls/mitmssl/tasks
     ./mitmssl -t -l 8443
-    iptables -t nat -A OUTPUT -p tcp --dport 443 -m mark ! --mark 1 \
+    iptables  -t nat -A OUTPUT -p tcp --dport 443 -m mark ! --mark 1 \
+        -j REDIRECT --to-port 8443
+    ip6tables -t nat -A OUTPUT -p tcp --dport 443 -m mark ! --mark 1 \
         -j REDIRECT --to-port 8443
 
 cgroup v2 (match by path, e.g. under systemd):
 
     systemd-run --unit=mitmssl --slice=mitmssl.slice \
         ./mitmssl -t -l 8443
-    iptables -t nat -A OUTPUT -p tcp --dport 443 \
+    iptables  -t nat -A OUTPUT -p tcp --dport 443 \
+        -m cgroup ! --path mitmssl.slice \
+        -j REDIRECT --to-port 8443
+    ip6tables -t nat -A OUTPUT -p tcp --dport 443 \
         -m cgroup ! --path mitmssl.slice \
         -j REDIRECT --to-port 8443
 
 With `-m mark ! --mark 1`, packets carrying no mark also match the
-negation, so make sure nothing else uses class 1.
+negation, so make sure nothing else uses class 1. The ip6tables rules
+are required as soon as the network carries IPv6, or the proxy's own
+IPv6 upstream traffic loops back into itself (same guard, same pitfall,
+in both address families).
 
 ## Protocol-agnostic inspection
 

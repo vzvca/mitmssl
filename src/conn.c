@@ -105,82 +105,198 @@ int alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen,
     return SSL_TLSEXT_ERR_NOACK;
 }
 
-static int g_host_idx = -1;
 
-static void host_idx_init(void)
+/* Choreography context, attached to the client SSL via ex_data.
+ * The client_hello callback runs on the first ClientHello: at that
+ * point we have the SNI, we connect upstream, clone its certificate,
+ * and attach it before the handshake continues. */
+struct chg_ctx {
+    char host[256];
+    uint16_t port;
+    int64_t id;
+    struct conn_log *lg;
+    int fd;
+};
+
+static int g_chg_idx = -1;
+
+static void chg_idx_init(void)
 {
-    if (g_host_idx < 0)
-        g_host_idx = CRYPTO_get_ex_new_index(CRYPTO_EX_INDEX_SSL, 0,
+    if (g_chg_idx < 0)
+        g_chg_idx = CRYPTO_get_ex_new_index(CRYPTO_EX_INDEX_SSL, 0,
                                              NULL, NULL, NULL, NULL);
 }
 
-int server_name_callback(SSL *ssl, int *al, void *arg)
+int client_hello_cb(SSL *ssl, int *al, void *arg)
 {
     (void)al; (void)arg;
-    const char *host = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
-    if (!host && g_host_idx >= 0)
-        host = SSL_get_ex_data(ssl, g_host_idx);
-    if (!host)
-        host = "unknown.local";
-    X509 *cert = forge_cert(host);
-    if (!cert) return SSL_TLSEXT_ERR_ALERT_FATAL;
-    SSL_use_certificate(ssl, cert);
+    struct chg_ctx *cc = SSL_get_ex_data(ssl, g_chg_idx);
+    if (!cc) return SSL_CLIENT_HELLO_ERROR;
+
+    /* client_hello_cb runs before OpenSSL parses extensions: extract
+     * the SNI from the raw ClientHello ourselves. */
+    const unsigned char *sni_buf = NULL;
+    size_t sni_len = 0;
+    char sni_buf_c[256] = {0};
+    const char *sni = NULL;
+    if (SSL_client_hello_get0_ext(ssl, TLSEXT_NAMETYPE_host_name,
+                                  &sni_buf, &sni_len) && sni_buf && sni_len > 5) {
+        /* server_name extension: 2-byte list len, 1-byte type (0=hostname),
+         * 2-byte len, then the name */
+        size_t name_len = (size_t)(sni_buf[3] << 8) | sni_buf[4];
+        if (name_len > 0 && name_len < sizeof(sni_buf_c) && name_len <= sni_len - 5) {
+            memcpy(sni_buf_c, sni_buf + 5, name_len);
+            sni_buf_c[name_len] = 0;
+            sni = sni_buf_c;
+        }
+    }
+    const char *upstream_host = sni ? sni : cc->host;
+
+    output_step(cc->id, "client hello: sni=%s", sni ? sni : "(none)");
+    output_step(cc->id, "connecting to upstream %s:%u", upstream_host, cc->port);
+
+    int rfd = connect_remote(upstream_host, cc->port);
+    if (rfd < 0) {
+        output_step(cc->id, "upstream connect failed: %s:%u",
+                     upstream_host, cc->port);
+        *al = SSL_AD_INTERNAL_ERROR;
+        return SSL_CLIENT_HELLO_ERROR;
+    }
+    output_step(cc->id, "upstream connected %s:%u", upstream_host, cc->port);
+
+    SSL *srv = SSL_new(g_server_ctx);
+    if (!srv) { close(rfd); *al = SSL_AD_INTERNAL_ERROR; return SSL_CLIENT_HELLO_ERROR; }
+    SSL_set_fd(srv, rfd);
+    SSL_set_connect_state(srv);
+    if (sni)
+        SSL_set_tlsext_host_name(srv, sni);
+    SSL_set_alpn_protos(srv, ALPN_HTTP11, sizeof(ALPN_HTTP11) - 1);
+
+    if (SSL_connect(srv) <= 0) {
+        output_step(cc->id, "upstream TLS handshake failed");
+        fprintf(stderr, APP_NAME ": upstream TLS handshake failed for %s:%u\n",
+                upstream_host, cc->port);
+        ERR_print_errors_fp(stderr);
+        SSL_free(srv);
+        close(rfd);
+        *al = SSL_AD_INTERNAL_ERROR;
+        return SSL_CLIENT_HELLO_ERROR;
+    }
+
+    const SSL_CIPHER *uc = SSL_get_current_cipher(srv);
+    output_step(cc->id, "upstream TLS ok: %s cipher=%s",
+                SSL_get_version(srv), uc ? SSL_CIPHER_get_name(uc) : "?");
+
+    X509 *peer = SSL_get1_peer_certificate(srv);
+    X509 *served = NULL;
+    if (peer) {
+        char subj[256] = "unknown";
+        served = clone_cert(peer, subj, sizeof(subj));
+        if (served)
+            output_step(cc->id, "cloned upstream cert: subject=%s", subj);
+        X509_free(peer);
+    }
+    if (!served) {
+        served = forge_cert(upstream_host);
+        if (served)
+            output_step(cc->id, "fallback forged cert for %s", upstream_host);
+    }
+    if (!served) {
+        SSL_free(srv);
+        close(rfd);
+        *al = SSL_AD_INTERNAL_ERROR;
+        return SSL_CLIENT_HELLO_ERROR;
+    }
+
+    SSL_set_ex_data(ssl, g_chg_idx, cc);
+    cc->fd = rfd;
+
+    /* Stash the upstream SSL on a second ex_data slot */
+    SSL_set_ex_data(ssl, g_chg_idx + 1000, srv);
+
+    SSL_use_certificate(ssl, served);
+    /* g_leaf_key is shared across threads: bump its refcount so that
+     * SSL_free on any single connection cannot free it under the feet
+     * of the others (race observed under load: alert 42). */
+    if (EVP_PKEY_up_ref(g_leaf_key) <= 0) {
+        X509_free(served);
+        SSL_free(srv);
+        close(rfd);
+        *al = SSL_AD_INTERNAL_ERROR;
+        return SSL_CLIENT_HELLO_ERROR;
+    }
     SSL_use_PrivateKey(ssl, g_leaf_key);
-    return SSL_TLSEXT_ERR_OK;
+    return SSL_CLIENT_HELLO_SUCCESS;
+}
+
+static SSL *get_upstream_ssl(SSL *cli)
+{
+    return SSL_get_ex_data(cli, g_chg_idx + 1000);
 }
 
 static int do_direct_tls(struct thread_arg *ta, char *host, uint16_t port)
 {
-    host_idx_init();
-    SSL *cli = SSL_new(g_client_ctx);
-    if (!cli) return -1;
-    SSL_set_fd(cli, ta->fd);
-    SSL_set_ex_data(cli, g_host_idx, (void *)host);
-    SSL_set_accept_state(cli);
-    if (SSL_accept(cli) <= 0) {
-        ERR_print_errors_fp(stderr);
-        SSL_free(cli);
-        return -1;
-    }
+    chg_idx_init();
 
-    const char *sni = SSL_get_servername(cli, TLSEXT_NAMETYPE_host_name);
-    if (!sni) sni = host;
-
-    int rfd = connect_remote(host, port);
-    if (rfd < 0) {
-        fprintf(stderr, APP_NAME ": cannot connect to upstream %s:%u\n",
-                host, port);
-        SSL_shutdown(cli);
-        SSL_free(cli);
-        close(ta->fd);
-        free(ta);
-        return -1;
-    }
-
-    SSL *srv = SSL_new(g_server_ctx);
-    SSL_set_fd(srv, rfd);
-    SSL_set_connect_state(srv);
-    SSL_set_tlsext_host_name(srv, sni);
-    SSL_set_alpn_protos(srv, ALPN_HTTP11, sizeof(ALPN_HTTP11) - 1);
-    if (SSL_connect(srv) <= 0) {
-        fprintf(stderr, APP_NAME ": upstream TLS handshake failed for %s:%u\n",
-                sni, port);
-        ERR_print_errors_fp(stderr);
-        SSL_free(srv);
-        SSL_shutdown(cli);
-        SSL_free(cli);
-        close(rfd);
-        close(ta->fd);
-        free(ta);
-        return -1;
-    }
-
+    int64_t id = output_open_flow(host, port, NULL, 0);
     struct conn_log *lg = calloc(1, sizeof(*lg));
     if (!lg) return -1;
+    lg->id = id;
+
+    struct chg_ctx *cc = calloc(1, sizeof(*cc));
+    if (!cc) { log_free(lg); close(ta->fd); free(ta); return -1; }
+    snprintf(cc->host, sizeof(cc->host), "%s", host);
+    cc->port = port;
+    cc->id = id;
+    cc->lg = lg;
+    cc->fd = -1;
+
+    SSL *cli = SSL_new(g_client_ctx);
+    if (!cli) {
+        free(cc);
+        log_free(lg);
+        close(ta->fd);
+        free(ta);
+        return -1;
+    }
+    SSL_set_fd(cli, ta->fd);
+    SSL_set_ex_data(cli, g_chg_idx, cc);
+    SSL_set_accept_state(cli);
+
+    if (SSL_accept(cli) <= 0) {
+        output_step(id, "client TLS handshake failed");
+        ERR_print_errors_fp(stderr);
+        SSL *dead = get_upstream_ssl(cli);
+        if (dead) { SSL_free(dead); }
+        if (cc->fd >= 0) close(cc->fd);
+        SSL_free(cli);
+        free(cc);
+        log_free(lg);
+        close(ta->fd);
+        free(ta);
+        return -1;
+    }
+
+    SSL *srv = get_upstream_ssl(cli);
+    if (!srv) {
+        SSL_free(cli);
+        free(cc);
+        log_free(lg);
+        close(ta->fd);
+        free(ta);
+        return -1;
+    }
+    int rfd = cc->fd;
+
     const unsigned char *alpn = NULL;
     unsigned int alpn_len = 0;
     SSL_get0_alpn_selected(cli, &alpn, &alpn_len);
-    lg->id = output_open_flow(sni, port, (const char *)alpn, alpn_len);
+    const SSL_CIPHER *cc2 = SSL_get_current_cipher(cli);
+    output_step(id, "client TLS ok: %s cipher=%s alpn=%.*s",
+                SSL_get_version(cli),
+                cc2 ? SSL_CIPHER_get_name(cc2) : "?",
+                (int)alpn_len, (const char *)alpn);
+
     if (g_mime) {
         lg->insp_c2s = inspect_new();
         lg->insp_s2c = inspect_new();
@@ -223,11 +339,13 @@ static int do_direct_tls(struct thread_arg *ta, char *host, uint16_t port)
     SSL_shutdown(cli);
     SSL_free(srv);
     SSL_free(cli);
+    free(cc);
     close(rfd);
     close(ta->fd);
     free(ta);
     return 0;
 }
+
 
 static int get_original_dst(int fd, char *host, size_t hostcap, uint16_t *port)
 {
@@ -253,9 +371,12 @@ static int get_original_dst(int fd, char *host, size_t hostcap, uint16_t *port)
 
 static int do_transparent(struct thread_arg *ta)
 {
-    char host[INET_ADDRSTRLEN];
+    char host[INET6_ADDRSTRLEN];
     uint16_t port;
     if (get_original_dst(ta->fd, host, sizeof(host), &port) != 0) {
+        fprintf(stderr,
+                APP_NAME ": cannot recover original destination "
+                         "(not NATed, or unsupported family)\n");
         close(ta->fd);
         free(ta);
         return -1;
