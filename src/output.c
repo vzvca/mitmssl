@@ -1,14 +1,15 @@
 #include "mitmssl.h"
+#include "../mitmssl_frame.h"
 
 #include <stdatomic.h>
 #include <stdarg.h>
 
 enum {
-    OP_OPEN = 1,
-    OP_IN   = 2,
-    OP_OUT  = 3,
-    OP_EOF  = 4,
-    OP_STEP = 5
+    OP_OPEN = MITMSSL_OP_OPEN,
+    OP_IN   = MITMSSL_OP_IN,
+    OP_OUT  = MITMSSL_OP_OUT,
+    OP_EOF  = MITMSSL_OP_EOF,
+    OP_STEP = MITMSSL_OP_STEP
 };
 
 static pthread_mutex_t g_out_mu = PTHREAD_MUTEX_INITIALIZER;

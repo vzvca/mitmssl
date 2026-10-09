@@ -71,35 +71,52 @@ accepted. Do not disable certificate verification on the client instead.
 ## Output framing
 
 All decoded traffic is written to stdout, interleaved across concurrent
-flows; each frame carries the id of its flow (a monotonic counter, never
-reused). Use shell pipes to process the stream (`tee`, `grep`, your own
-tool, ...).
+flows; each frame carries the id of its flow (a per-process monotonic
+counter starting at 1, never reused). Use shell pipes to process the
+stream (`tee`, `grep`, your own tool, ...).
 
 Text framing (default):
 
     # 7 OPEN example.com:443 alpn=http/1.1
+    7 -- client hello: sni=example.com
+    7 -- upstream TLS ok: TLSv1.3 cipher=TLS_AES_256_GCM_SHA384
+    7 -- cloned upstream cert: subject=example.com
+    7 -- client TLS ok: TLSv1.3 cipher=TLS_AES_256_GCM_SHA384 alpn=http/1.1
     7 >> 122
     <122 raw bytes, client to server>
     7 << 139
     <139 raw bytes, server to client>
     7 ## EOF
 
-With `-m`, the payload of `>>`/`<<` frames is rendered (HTTP headers kept,
-text bodies as-is, binary bodies hexdumped) instead of raw bytes.
+`# ... OPEN` is emitted when the flow starts (destination known from
+the CONNECT request or SO_ORIGINAL_DST; the `alpn=` suffix appears once
+the client negotiates ALPN). `-- ...` lines are handshake and lifecycle
+steps (see Handshake trace). `>>`/`<<` carry the decoded application
+bytes; `## EOF` closes the flow. With `-m`, the payload of `>>`/`<<`
+frames is rendered (HTTP headers kept, text bodies as-is, binary bodies
+hexdumped) instead of raw bytes.
 
 Binary framing (`-b`), for machine consumers: each frame is a 12-byte
 header followed by `sz` payload bytes:
 
     struct frame {
-        int32_t op;   /* 1=OPEN, 2=IN (c2s), 3=OUT (s2c), 4=EOF */
+        int32_t op;   /* 1=OPEN, 2=IN (c2s), 3=OUT (s2c), 4=EOF, 5=STEP */
         int32_t sz;   /* payload size, may be 0 */
         int32_t id;   /* flow id, monotonic, never reused */
         /* uint8_t data[sz]; */
     };
 
-The OPEN payload is the destination `host:port` string, optionally followed
-by ` alpn=<proto>` when the client negotiated ALPN. IN/OUT payloads are
-raw decoded bytes. EOF has sz=0. Fields are native-endian int32.
+The OPEN payload is the destination `host:port` string (the `alpn=`
+suffix is appended once ALPN is negotiated). IN/OUT payloads are raw
+decoded bytes. EOF has sz=0. STEP payloads are human-readable step
+strings, same content as the text `--` lines. Fields are
+native-endian int32.
+
+The header `mitmssl_frame.h` at the repository root provides the
+authoritative definitions (frame header struct and op constants) for
+tools that consume the binary stream:
+
+    #include "mitmssl_frame.h"
 
 ## Handshake trace
 
